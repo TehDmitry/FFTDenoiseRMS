@@ -17,7 +17,7 @@ Signal provided by IKEA LED lamp
 ### Signal [sig.wav](FFTDenoiseRMS/audio_samples/sig.wav)
 ![sig](images/sig.png)
 
-## After substraction
+## After subtraction
 ### Signal - Noise -10dB  [denoise-10dB.wav](FFTDenoiseRMS/audio_samples/after_denoise/denoise-10dB.wav)
 ![diff](images/denoise-10dB.png)
 
