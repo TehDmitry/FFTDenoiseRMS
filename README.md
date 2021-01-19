@@ -2,7 +2,7 @@
 
 Draft project
 
-Subtract average wav file spectrum from another using FFT. For example substract average background noise from recording.
+Subtract average wav file «spectrum» from another using FFT. For example subtract average background noise from recording.
 
 Push the «Draw Test Data» button and listen bin\Debug\denoise.wav
 
