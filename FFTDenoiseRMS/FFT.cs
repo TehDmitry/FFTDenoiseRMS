@@ -38,7 +38,7 @@ namespace FFTDenoiseRMS
         double ENBW;
 
 
-        public double minFreq = 10;
+        public double minFreq = 20;
         public double maxFreq = 22050;
 
         int sample_rate = 44100;
@@ -46,16 +46,19 @@ namespace FFTDenoiseRMS
 
         float[] realSamples;
 
-        double[] avgSamples;
+        double[] avgMagnitude;
 
-        public double[] AvgSamples { get => avgSamples; }
+        public double[] AvgSamples { get => avgMagnitude; }
+        public double RMS { get => _RMS; }
+
+        double _RMS;
 
         public FFT(int fft_size)
         {
             this.fft_size = fft_size;
 
             window = new double[fft_size];
-            avgSamples = new double[fft_size];
+            avgMagnitude = new double[fft_size];
 
             sum_win_s1 = 0;
             sum_win_s2 = 0;
@@ -96,22 +99,25 @@ namespace FFTDenoiseRMS
                     chReader = mono;
                 }
 
-                var pcm = new NAudio.Wave.SampleProviders.SampleToWaveProvider16(chReader);
-
-                var buffer = new byte[2 * chReader.WaveFormat.SampleRate];
-                pcm.Read(buffer, 0, buffer.Length);
-
-                //samples = buffer.Select(b => (short)b).ToArray();
-                samples = new short[(int)Math.Ceiling((double)buffer.Length / 2)];
-                Buffer.BlockCopy(buffer, 0, samples, 0, buffer.Length);
-
                 sample_rate = reader.WaveFormat.SampleRate;
 
-                realSamples = new float[reader.WaveFormat.SampleRate];
+                //realSamples = new float[reader.WaveFormat.SampleRate];
+                //chReader.Read(realSamples, 0, realSamples.Length);
+
+                realSamples = new float[reader.TotalTime.Seconds * reader.WaveFormat.SampleRate];
                 chReader.Read(realSamples, 0, realSamples.Length);
             }
 
-            avgSamples = getAvgFFTSamples(realSamples, fft_size);
+            float sumOfSamples = 0;
+            for (int i = 0; i < realSamples.Length; i++)
+            {
+                sumOfSamples += realSamples[i] * realSamples[i];
+            }
+
+            _RMS = Math.Sqrt(sumOfSamples / realSamples.Length);
+            _RMS = Math.Round(20 * Math.Log10(_RMS), 1);
+
+            avgMagnitude = getAvgFFTSamples(realSamples, fft_size);
         }
 
 
@@ -122,6 +128,7 @@ namespace FFTDenoiseRMS
             (PS) or the power spectral density (PSD), not with their square roots LS or LSD.
              */
 
+
             var meanMags = new double[fft_size];
             int numSignals = 0;
 
@@ -131,7 +138,8 @@ namespace FFTDenoiseRMS
 
                 Array.Copy(audioSamples, startPos, buffer, 0, fft_size);
 
-                double[] fftResult = FFT_AForge(buffer, fft_size);
+                //double[] fftResult = FFT_AForge(buffer, fft_size);
+                double[] fftResult = FFT_MathNET(buffer, fft_size);
 
                 for (int i = 0; i < fft_size; i++)
                 {
@@ -140,7 +148,6 @@ namespace FFTDenoiseRMS
                 numSignals++;
             }
 
-            List<KeyValuePair<double, double>> result = new List<KeyValuePair<double, double>>();
             for (int i = 0; i < fft_size; i++)
             {
                 meanMags[i] /= numSignals;
@@ -149,6 +156,24 @@ namespace FFTDenoiseRMS
             return meanMags;
         }
 
+        public double[] FFT_MathNET(float[] buffer, int fft_size)
+        {
+            double[] result = new double[fft_size];
+            float average = buffer.Average(); // for DC and trend removal
+            var complexBuffer = new MathNet.Numerics.Complex32[fft_size];
+            for (int i = 0; i < fft_size; i++)
+            {
+                complexBuffer[i] = new MathNet.Numerics.Complex32((float)((buffer[i] - average) * window[i]), 0);
+            }
+
+            MathNet.Numerics.IntegralTransforms.Fourier.Forward(complexBuffer, MathNet.Numerics.IntegralTransforms.FourierOptions.NoScaling);
+            for (int i = 1; i < fft_size; i++)
+            {
+                result[i] = Math.Pow(complexBuffer[i].Magnitude, 2);
+            }
+
+            return result;
+        }
 
         public double[] FFT_AForge(float[] buffer, int fft_size)
         {
@@ -164,8 +189,8 @@ namespace FFTDenoiseRMS
 
             }
 
-            //AForge.Math.FourierTransform.FFT(complexBuffer, AForge.Math.FourierTransform.Direction.Backward);
-            AForge.Math.FourierTransform.FFT(complexBuffer, AForge.Math.FourierTransform.Direction.Forward);
+            AForge.Math.FourierTransform.FFT(complexBuffer, AForge.Math.FourierTransform.Direction.Backward);
+            //AForge.Math.FourierTransform.FFT(complexBuffer, AForge.Math.FourierTransform.Direction.Forward);
 
             for (int i = 1; i < fft_size / 2; i++)
             {
@@ -195,44 +220,44 @@ namespace FFTDenoiseRMS
         public List<KeyValuePair<double, double>> getFFT()
         {
             List<KeyValuePair<double, double>> result = new List<KeyValuePair<double, double>>();
-
-            for (int i = 0; i < avgSamples.Length / 2; i++)
+            for (int i = 0; i < avgMagnitude.Length / 2; i++)
             {
-                double freq = i * (float)sample_rate / (float)avgSamples.Length;
-
-                //PS RMS (23)
-                double value = (2 * avgSamples[i]) / (sum_win_s1 * sum_win_s1);
-                //LS
-                value = Math.Sqrt(value);
-
-                //PSD RMS
-                //double value = (2 * avgSamples[i]) / (sample_rate * sum_win_s2);
-                //LSD
-                //value = Math.Sqrt(value);
-
-
+                double freq = i * (float)sample_rate / (float)avgMagnitude.Length;
                 if (freq >= minFreq && freq <= maxFreq)
                 {
-                    double valuedB = 20 * Math.Log10(value); // + 75;
-                    if (Double.IsNaN(valuedB)) // || valuedB < -96
-                    {
-                        valuedB = -96;
-                    }
-
-                    KeyValuePair<double, double> item = new KeyValuePair<double, double>(freq, valuedB); //
-                    //KeyValuePair<double, double> item = new KeyValuePair<double, double>(freq, 10 * Math.Log10(value)); // + 134
+                    KeyValuePair<double, double> item = new KeyValuePair<double, double>(freq, getdBVal(avgMagnitude[i])); //
                     result.Add(item);
                 }
             }
-
             return result;
+        }
+
+        private double getdBVal(double fftVal)
+        {
+            //PS RMS (23)
+            double value = (2 * fftVal) / (sum_win_s1 * sum_win_s1);
+            //LS
+            value = Math.Sqrt(value);
+
+            //PSD RMS
+            //double value = (2 * avgSamples[i]) / (sample_rate * sum_win_s2);
+            //LSD
+            //value = Math.Sqrt(value);
+
+            // https://dsp.stackexchange.com/questions/8785/how-to-compute-dbfs
+            double valuedB = 20 * Math.Log10(value * Math.Sqrt(2));
+
+            if (Double.IsNaN(valuedB) || value == 0 || valuedB < -96)
+            {
+                valuedB = -96;
+            }
+
+            return valuedB;
         }
 
 
         public double getRMS()
         {
-
-            double decibel;
             double sum = 0;
             int len = 0;
 
@@ -241,83 +266,121 @@ namespace FFTDenoiseRMS
                 double freq = i * (float)sample_rate / (float)fft_size;
                 if (freq >= minFreq && freq <= maxFreq)
                 {
-                    //sum += Math.Pow(fft[i], 2);
-
-                    //PSD RMS
-                    double value = (2 * avgSamples[i]) / (sample_rate * sum_win_s2);
-                    //LSD
-                    //value = Math.Sqrt(value);
-
-                    sum += value;
+                    sum += avgMagnitude[i];// * value;
                     len++;
                 }
             }
 
-            //double rmsa = Math.Sqrt(sum / (fft.Length * fft.Length / 4));
-
-            //decibel = 20 * Math.Log10(Math.Sqrt(sum / Math.Pow(len, 2))) + 201; // + 273; // + 339.5; // + 131.8; + 204
-
-            decibel = 10 * Math.Log10(Math.Sqrt(sum / Math.Pow(len, 2))) + 73;
-
-            return decibel;
+            return 20 * Math.Log10(Math.Sqrt(sum / (len * len)));
         }
 
         public void subtractNoise(double[] fft_noise)
         {
             for (int i = 0; i < fft_size; i++)
             {
-                avgSamples[i] = avgSamples[i] - fft_noise[i];
+                if (getdBVal(avgMagnitude[i]) - getdBVal(fft_noise[i]) > 10)
+                {
+
+                    avgMagnitude[i] = avgMagnitude[i] - fft_noise[i];
+
+                    if (avgMagnitude[i] < 0)
+                    {
+                        avgMagnitude[i] = 0;
+                    }
+                }
+                else
+                {
+                    avgMagnitude[i] = 0;
+                }
             }
         }
-        public short[] restoreFromFFT(double[] fft)
+
+
+        public void denoise(String inFileName, String outFileName, int dbLimit)
         {
-            short[] samples = new short[fft_size];
-            double[] samples_alt = new double[fft_size];
+            float[] samples;
+            float[] samplesOut;
 
-
-            for (int i = 0; i < fft_size; i++)
+            using (AudioFileReader reader = new AudioFileReader(inFileName))
             {
-                double summ = 0;
-
-                for (int k = 0; k < fft_size; k++)
+                ISampleProvider chReader = reader;
+                if (reader.WaveFormat.Channels == 2)
                 {
-                    // val += waves[n]*np.exp(1.j * 2*np.pi * n * k / len(waves))
-                    //System.Numerics.Complex j = System.Numerics.Complex.ImaginaryOne * -1;
-                    // / 32768
-                    System.Numerics.Complex result = (fft[k] / 32768) * System.Numerics.Complex.Exp(System.Numerics.Complex.ImaginaryOne * 2 * Math.PI * k / fft_size);
-                    // System.Numerics.Complex result = fft[k];
-                    //System.Numerics.Complex result = System.Numerics.Complex.Exp(System.Numerics.Complex.ImaginaryOne * 2 * Math.PI * k / fft_size);
+                    var mono = new NAudio.Wave.SampleProviders.StereoToMonoSampleProvider(reader);
+                    mono.LeftVolume = 1.0f; // 
+                    mono.RightVolume = 0.0f; //
 
-                    summ += result.Magnitude;
-
+                    //mono.LeftVolume = 0.5f; // discard the left channel
+                    //mono.RightVolume = 0.5f; // keep the right channel
+                    chReader = mono;
                 }
 
-                samples[i] = (short)summ;
-
+                //samples = new float[reader.WaveFormat.SampleRate * reader.Length];
+                samples = new float[reader.TotalTime.Seconds * reader.WaveFormat.SampleRate];
+                chReader.Read(samples, 0, samples.Length);
             }
 
+            samplesOut = new float[samples.Length];
 
-
-            var complexBuffer = new AForge.Math.Complex[fft_size];
-            for (int i = 0; i < fft_size; i++)
+            for (int startPos = 0; startPos < samples.Length - fft_size; startPos += fft_size)
             {
-                complexBuffer[i].Re = Math.Sqrt(fft[i] * sum_win_s1 / 2.0);
-                complexBuffer[i].Im = 0;
+                float[] buffer = new float[fft_size];
+
+                Array.Copy(samples, startPos, buffer, 0, fft_size);
+
+                float average = buffer.Average(); // for DC and trend removal
+                var complexBufferIn = new MathNet.Numerics.Complex32[fft_size];
+                var complexBufferOut = new MathNet.Numerics.Complex32[fft_size];
+
+                for (int i = 0; i < fft_size; i++)
+                {
+                    //complexBufferIn[i] = new MathNet.Numerics.Complex32((float)((buffer[i] - average) * window[i]), 0);
+                    complexBufferIn[i] = new MathNet.Numerics.Complex32((float)((buffer[i] - average)), 0);
+                }
+
+                MathNet.Numerics.IntegralTransforms.Fourier.Forward(complexBufferIn, MathNet.Numerics.IntegralTransforms.FourierOptions.NoScaling);
+
+                for (int i = 0; i < fft_size; i++)
+                {
+                    float magDiff = (float)complexBufferIn[i].Magnitude;
+
+                    if (dbLimit >= 0)
+                    {
+                        double dbDiff = getdBVal(complexBufferIn[i].Magnitude) - getdBVal(avgMagnitude[i]);
+                        if (dbDiff < dbLimit)
+                        {
+                            magDiff = 0;
+                        }
+                    }
+                    else
+                    {
+                        magDiff -= (float)Math.Sqrt(avgMagnitude[i]);
+                        if (magDiff < 0)
+                        {
+                            magDiff = 0;
+                        }
+                    }
+
+                    magDiff = (float)(magDiff / Math.Sqrt(fft_size)); //normalize for default transform
+                    //magDiff = (float)(magDiff / sum_win_s1);
+                    complexBufferOut[i] = new MathNet.Numerics.Complex32((float)(magDiff * Math.Cos(complexBufferIn[i].Phase)), (float)(magDiff * Math.Sin(complexBufferIn[i].Phase)));
+                }
+
+                MathNet.Numerics.IntegralTransforms.Fourier.Inverse(complexBufferOut, MathNet.Numerics.IntegralTransforms.FourierOptions.Default);
+                //MathNet.Numerics.IntegralTransforms.Fourier.Inverse(complexBufferOut, MathNet.Numerics.IntegralTransforms.FourierOptions.NoScaling);
+
+                for (int i = 0; i < fft_size; i++)
+                {
+                    samplesOut[startPos + i] = complexBufferOut[i].Real;
+                }
             }
 
-            AForge.Math.FourierTransform.FFT(complexBuffer, AForge.Math.FourierTransform.Direction.Forward);
-
-            for (int i = 0; i < fft_size; i++)
+            using (WaveFileWriter writer = new WaveFileWriter(outFileName, new WaveFormat(44100, 1)))
             {
-                double s_mag = complexBuffer[i].Magnitude * 2.0 / sum_win_s1;  // Scale the magnitude of FFT by window and factor of 2,
-                                                                               // because we are using half of FFT spectrum
-
-                //samples[i] = (double)s_mag;
-
-                samples_alt[i] = (double)s_mag;
+                writer.WriteSamples(samplesOut, 0, samplesOut.Length);
             }
 
-            return samples;
+            avgMagnitude = getAvgFFTSamples(realSamples, fft_size);
         }
     }
 }
